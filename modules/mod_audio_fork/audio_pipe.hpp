@@ -4,6 +4,9 @@
 #include <string>
 #include <list>
 #include <mutex>
+#include <queue>
+#include <unordered_map>
+#include <thread>
 
 #include <libwebsockets.h>
 
@@ -25,7 +28,7 @@ public:
     MESSAGE
   };
   typedef void (*log_emit_function)(int level, const char *line);
-  typedef void (*notifyHandler_t)(const char *sessionId, NotifyEvent_t event, const char* message);
+  typedef void (*notifyHandler_t)(const char *sessionId, const char* bugname, NotifyEvent_t event, const char* message);
 
   struct lws_per_vhost_data {
     struct lws_context *context;
@@ -39,7 +42,7 @@ public:
 
   // constructor
   AudioPipe(const char* uuid, const char* host, unsigned int port, const char* path, int sslFlags, 
-    size_t bufLen, size_t minFreespace, const char* username, const char* password, notifyHandler_t callback);
+    size_t bufLen, size_t minFreespace, const char* username, const char* password, char* bugname, notifyHandler_t callback);
   ~AudioPipe();  
 
   LwsState_t getLwsState(void) { return m_state; }
@@ -88,8 +91,6 @@ public:
 private:
 
   static int lws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len); 
-  static bool lws_initialized;
-  static bool lws_stopping;
   static unsigned int nchild;
   static struct lws_context *contexts[];
   static unsigned int numContexts;
@@ -101,6 +102,10 @@ private:
   static std::list<AudioPipe*> pendingDisconnects;
   static std::list<AudioPipe*> pendingWrites;
   static log_emit_function logger;
+
+  static std::mutex mapMutex;
+  static std::unordered_map<std::thread::id, bool> stopFlags;
+  static std::queue<std::thread::id> threadIds;
 
   static AudioPipe* findAndRemovePendingConnect(struct lws *wsi);
   static AudioPipe* findPendingConnect(struct lws *wsi);
@@ -116,6 +121,7 @@ private:
   LwsState_t m_state;
   std::string m_uuid;
   std::string m_host;
+  std::string m_bugname;
   unsigned int m_port;
   std::string m_path;
   std::string m_metadata;
@@ -129,13 +135,13 @@ private:
   size_t m_audio_buffer_min_freespace;
   uint8_t* m_recv_buf;
   uint8_t* m_recv_buf_ptr;
+  size_t m_recv_buf_len;
   struct lws_per_vhost_data* m_vhd;
   notifyHandler_t m_callback;
   log_emit_function m_logger;
   std::string m_username;
   std::string m_password;
   bool m_gracefulShutdown;
-
 };
 
 #endif
