@@ -103,8 +103,8 @@ static switch_status_t speech_read_tts(switch_speech_handle_t *sh, void *data, s
 		unlink(google->file);
 		return SWITCH_STATUS_FALSE;
 	}
-	*datalen = my_datalen * 2;
-	if (datalen == 0) {
+        *datalen = my_datalen * 2;
+        if (*datalen == 0) {
 		switch_core_file_close(google->fh);
 		unlink(google->file);
 		return SWITCH_STATUS_BREAK;
