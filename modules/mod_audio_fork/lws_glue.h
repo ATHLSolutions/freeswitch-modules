@@ -3,6 +3,10 @@
 
 #include "mod_audio_fork.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int parse_ws_uri(switch_channel_t *channel, const char* szServerUri, char* host, char *path, unsigned int* pPort, int* pSslFlags);
 
 switch_status_t fork_init();
@@ -17,4 +21,9 @@ switch_status_t fork_session_send_text(switch_core_session_t *session, char *bug
 switch_bool_t fork_frame(switch_core_session_t *session, switch_media_bug_t *bug);
 switch_status_t fork_service_threads();
 switch_status_t fork_session_connect(void **ppUserData);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif
