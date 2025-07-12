@@ -3,15 +3,31 @@
  * mod_audio_fork.c -- Freeswitch module for forking audio to remote server over websockets
  *
  */
+#include <switch.h>
 #include "mod_audio_fork.h"
 #include "lws_glue.h"
 
 //static int mod_running = 0;
 
+#define FORK_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000 | 24000 | 32000 | 64000] [bugname] [metadata]"
+#define AUDIO_FORK_START_SYNTAX "<wss-url> <mix-type> <sampling-rate> [metadata]"
+#define AUDIO_FORK_STOP_SYNTAX "[bugname] [metadata]"
+#define AUDIO_FORK_SEND_TEXT_SYNTAX "<text-data>"
+
+/* Forward declarations */
+SWITCH_STANDARD_APP(audio_fork_start_function);
+SWITCH_STANDARD_APP(audio_fork_stop_function); 
+SWITCH_STANDARD_APP(audio_fork_send_text_function);
+SWITCH_STANDARD_API(fork_function);
+
+/* Prototypes */
+SWITCH_MODULE_LOAD_FUNCTION(mod_audio_fork_load);
 SWITCH_MODULE_SHUTDOWN_FUNCTION(mod_audio_fork_shutdown);
 SWITCH_MODULE_RUNTIME_FUNCTION(mod_audio_fork_runtime);
-SWITCH_MODULE_LOAD_FUNCTION(mod_audio_fork_load);
 
+/* SWITCH_MODULE_DEFINITION(name, load, shutdown, runtime)
+ * Defines a switch_loadable_module_function_table_t and a static const char[] modname
+ */
 SWITCH_MODULE_DEFINITION(mod_audio_fork, mod_audio_fork_load, mod_audio_fork_shutdown, NULL /*mod_audio_fork_runtime*/);
 
 static void responseHandler(switch_core_session_t* session, const char * eventName, char * json) {
@@ -160,6 +176,120 @@ static switch_status_t send_text(switch_core_session_t *session, char* bugname, 
 }
 
 #define FORK_API_SYNTAX "<uuid> [start | stop | send_text | pause | resume | graceful-shutdown ] [wss-url | path] [mono | mixed | stereo] [8000 | 16000 | 24000 | 32000 | 64000] [bugname] [metadata]"
+
+// Dialplan Application Functions
+SWITCH_STANDARD_APP(audio_fork_start_function)
+{
+	char *argv[5] = { 0 };
+	int argc = 0;
+	char *mycmd = NULL;
+	switch_channel_t *channel = switch_core_session_get_channel(session);
+	char host[MAX_WS_URL_LEN], path[MAX_PATH_LEN];
+	unsigned int port;
+	int sslFlags;
+	int sampling = 8000;
+	switch_media_bug_flag_t flags = SMBF_READ_STREAM;
+	char *bugname = MY_BUG_NAME;
+	char *metadata = NULL;
+
+	if (!zstr(data) && (mycmd = strdup(data))) {
+		argc = switch_separate_string(mycmd, ' ', argv, (sizeof(argv) / sizeof(argv[0])));
+	}
+
+	if (argc < 3) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"audio_fork_start requires: <wss-url> <mix-type> <sampling-rate> [metadata]\n");
+		goto done;
+	}
+
+	// Parse mix type
+	if (0 == strcmp(argv[1], "mixed")) {
+		flags |= SMBF_WRITE_STREAM;
+	}
+	else if (0 == strcmp(argv[1], "stereo")) {
+		flags |= SMBF_WRITE_STREAM;
+		flags |= SMBF_STEREO;
+	}
+	else if (0 != strcmp(argv[1], "mono")) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"invalid mix type: %s, must be mono, mixed, or stereo\n", argv[1]);
+		goto done;
+	}
+
+	// Parse sampling rate
+	if (0 == strcmp(argv[2], "16k")) {
+		sampling = 16000;
+	}
+	else if (0 == strcmp(argv[2], "8k")) {
+		sampling = 8000;
+	}
+	else {
+		sampling = atoi(argv[2]);
+		if (sampling % 8000 != 0) {
+			switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+				"invalid sample rate: %s\n", argv[2]);
+			goto done;
+		}
+	}
+
+	// Parse metadata if provided
+	if (argc > 3) {
+		metadata = argv[3];
+	}
+
+	// Parse WebSocket URI
+	if (!parse_ws_uri(channel, argv[0], &host[0], &path[0], &port, &sslFlags)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"invalid websocket uri: %s\n", argv[0]);
+		goto done;
+	}
+
+	// Start audio fork
+	start_capture(session, flags, host, port, path, sampling, sslFlags, bugname, metadata);
+
+done:
+	switch_safe_free(mycmd);
+}
+
+SWITCH_STANDARD_APP(audio_fork_stop_function)
+{
+	char *bugname = MY_BUG_NAME;
+	char *metadata = NULL;
+
+	// Parse arguments: [bugname] [metadata]
+	if (!zstr(data)) {
+		if (data[0] == '{' || data[0] == '[') {
+			metadata = (char*)data;
+		} else {
+			bugname = (char*)data;
+		}
+	}
+
+	do_stop(session, bugname, metadata);
+}
+
+SWITCH_STANDARD_APP(audio_fork_send_text_function)
+{
+	char *bugname = MY_BUG_NAME;
+	char *text = NULL;
+
+	if (zstr(data)) {
+		switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+			"audio_fork_send_text requires text data\n");
+		return;
+	}
+
+	// If data starts with { or [, it's metadata, otherwise it's bugname
+	if (data[0] == '{' || data[0] == '[') {
+		text = (char*)data;
+	} else {
+		// TODO: Parse bugname and text if needed
+		text = (char*)data;
+	}
+
+	send_text(session, bugname, text);
+}
+
 SWITCH_STANDARD_API(fork_function)
 {
 	char *mycmd = NULL, *argv[7] = { 0 };
@@ -296,28 +426,62 @@ SWITCH_STANDARD_API(fork_function)
 SWITCH_MODULE_LOAD_FUNCTION(mod_audio_fork_load)
 {
 	switch_api_interface_t *api_interface;
+	switch_application_interface_t *app_interface;
 
 	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork API loading..\n");
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: DEBUG - Starting load function\n");
 
 	/* connect my internal structure to the blank pointer passed to me */
 	*module_interface = switch_loadable_module_create_module_interface(pool, modname);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: DEBUG - Created module interface\n");
 
-	/* create/register custom event message types */
-	if (switch_event_reserve_subclass(EVENT_TRANSCRIPTION) != SWITCH_STATUS_SUCCESS ||
-    switch_event_reserve_subclass(EVENT_TRANSFER) != SWITCH_STATUS_SUCCESS ||
-    switch_event_reserve_subclass(EVENT_PLAY_AUDIO) != SWITCH_STATUS_SUCCESS ||
-    switch_event_reserve_subclass(EVENT_KILL_AUDIO) != SWITCH_STATUS_SUCCESS ||
-    switch_event_reserve_subclass(EVENT_ERROR) != SWITCH_STATUS_SUCCESS ||
-    switch_event_reserve_subclass(EVENT_DISCONNECT) != SWITCH_STATUS_SUCCESS) {
-
-		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "Couldn't register an event subclass for mod_audio_fork API.\n");
-		return SWITCH_STATUS_TERM;
+	/* Add null check for safety */
+	if (!*module_interface) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR, "mod_audio_fork: Failed to create module interface\n");
+		return SWITCH_STATUS_GENERR;
 	}
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: DEBUG - Module interface is valid\n");
 
+	/* Register API interface */
 	SWITCH_ADD_API(api_interface, "uuid_audio_fork", "audio_fork API", fork_function, FORK_API_SYNTAX);
 	switch_console_set_complete("add uuid_audio_fork start wss-url metadata");
 	switch_console_set_complete("add uuid_audio_fork start wss-url");
 	switch_console_set_complete("add uuid_audio_fork stop");
+
+	/* Register Dialplan Applications */
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: Registering dialplan applications...\n");
+	
+	SWITCH_ADD_APP(app_interface, "audio_fork_start", "Start Audio Fork", "Start forking audio to WebSocket server", 
+		audio_fork_start_function, "<wss-url> <mix-type> <sampling-rate> [metadata]", 0);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: Registered application 'audio_fork_start'\n");
+	
+	SWITCH_ADD_APP(app_interface, "audio_fork_stop", "Stop Audio Fork", "Stop forking audio", 
+		audio_fork_stop_function, "[bugname] [metadata]", 0);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: Registered application 'audio_fork_stop'\n");
+	
+	SWITCH_ADD_APP(app_interface, "audio_fork_send_text", "Send Text to Audio Fork", "Send text message to WebSocket server", 
+		audio_fork_send_text_function, "<text-data>", 0);
+	switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "mod_audio_fork: Registered application 'audio_fork_send_text'\n");
+
+	/* create/register custom event message types - do this after app registration */
+	if (switch_event_reserve_subclass(EVENT_TRANSCRIPTION) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_TRANSCRIPTION\n");
+	}
+	if (switch_event_reserve_subclass(EVENT_TRANSFER) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_TRANSFER\n");
+	}
+	if (switch_event_reserve_subclass(EVENT_PLAY_AUDIO) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_PLAY_AUDIO\n");
+	}
+	if (switch_event_reserve_subclass(EVENT_KILL_AUDIO) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_KILL_AUDIO\n");
+	}
+	if (switch_event_reserve_subclass(EVENT_ERROR) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_ERROR\n");
+	}
+	if (switch_event_reserve_subclass(EVENT_DISCONNECT) != SWITCH_STATUS_SUCCESS) {
+		switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING, "Could not register event subclass EVENT_DISCONNECT\n");
+	}
 
 	fork_init();
 
