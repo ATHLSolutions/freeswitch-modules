@@ -295,9 +295,8 @@ namespace {
 
 extern "C" {
   int parse_ws_uri(switch_channel_t *channel, const char* szServerUri, char* host, char *path, unsigned int* pPort, int* pSslFlags) {
-    int i = 0, offset;
+    int offset;
     char server[MAX_WS_URL_LEN + MAX_PATH_LEN];
-    char *saveptr;
     int flags = LCCSCF_USE_SSL;
     
     if (switch_true(switch_channel_get_variable(channel, "MOD_AUDIO_FORK_ALLOW_SELFSIGNED"))) {
@@ -336,7 +335,7 @@ extern "C" {
       *pPort = 80;
     }
     else {
-      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - error parsing uri %s: invalid scheme\n", szServerUri);;
+      switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE, "parse_ws_uri - error parsing uri %s: invalid scheme\n", szServerUri);
       return 0;
     }
 
